@@ -2,8 +2,7 @@ nodes:
   - id: dora-microphone
     path: ../target/release/examples/echo_server
     inputs:
-      # audio: hibiki/text
-      audio2: dora-whisper/text
+      audio: hibiki/text
     outputs:
       - audio
 
