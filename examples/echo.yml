@@ -1,0 +1,16 @@
+nodes:
+  - id: dora-microphone
+    path: ../target/release/examples/echo_server
+    inputs:
+      # audio: dora-echo/audio
+      audio2: dora-whisper/text
+    outputs:
+      - audio
+
+  - id: dora-echo
+    build: pip install -e ../../node-hub/dora-echo
+    path: dora-echo
+    inputs:
+      audio: dora-microphone/audio
+    outputs:
+      - audio

@@ -1,0 +1,40 @@
+nodes:
+  - id: dora-microphone
+    path: ../target/release/examples/echo_server
+    inputs:
+      # audio: hibiki/text
+      audio2: dora-whisper/text
+    outputs:
+      - audio
+
+  # - id: hibiki
+  # path: /Users/xaviertao/Documents/work/delayed-streams-modeling/stt-rs/target/release/kyutai-stt-rs
+  # args: gen
+  # inputs:
+  # audio:
+  # source: dora-microphone/audio
+  # queue_size: 1000000
+  # outputs:
+  # - text
+
+  - id: dora-vad
+    build: pip install -e /Users/xaviertao/Documents/work/dora/node-hub/dora-vad
+    path: dora-vad
+    inputs:
+      audio:
+        source: dora-microphone/audio
+        queue_size: 1000000
+    outputs:
+      - audio
+
+  - id: dora-whisper
+    build: pip install -e /Users/xaviertao/Documents/work/dora/node-hub/dora-distil-whisper
+    path: dora-distil-whisper
+    inputs:
+      audio:
+        source: dora-vad/audio
+        queue_size: 1000000
+    outputs:
+      - text
+    env:
+      TARGET_LANGUAGE: english

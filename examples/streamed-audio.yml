@@ -1,0 +1,18 @@
+nodes:
+  - id: dora-microphone
+    path: ../target/release/examples/echo_server
+    inputs:
+      # audio: hibiki/text
+      audio2: dora-whisper/text
+    outputs:
+      - audio
+
+  - id: hibiki
+    path: /Users/xaviertao/Documents/work/delayed-streams-modeling/stt-rs/target/release/kyutai-stt-rs
+    args: gen
+    inputs:
+      audio:
+        source: dora-microphone/audio
+        queue_size: 1000000
+    outputs:
+      - text

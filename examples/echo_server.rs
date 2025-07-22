@@ -12,8 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
+use dora_node_api::arrow::array::AsArray;
+use dora_node_api::arrow::array::OffsetSizeTrait;
+use dora_node_api::arrow::datatypes::DataType;
+use dora_node_api::dora_core::config::DataId;
+use dora_node_api::dora_core::config::Input;
+use dora_node_api::into_vec;
+use dora_node_api::DoraNode;
+use dora_node_api::IntoArrow;
+use dora_node_api::MetadataParameters;
 use fastwebsockets::upgrade;
+use fastwebsockets::Frame;
 use fastwebsockets::OpCode;
+use fastwebsockets::Payload;
 use fastwebsockets::WebSocketError;
 use http_body_util::Empty;
 use hyper::body::Bytes;
@@ -22,17 +35,288 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::Request;
 use hyper::Response;
+use serde;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::net::TcpListener;
+use tokio_rustls::rustls::internal::msgs::base;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ErrorDetails {
+  pub code: Option<String>,
+  pub message: String,
+  pub param: Option<String>,
+  #[serde(rename = "type")]
+  pub error_type: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+pub enum OpenAIRealtimeMessage {
+  #[serde(rename = "session.update")]
+  SessionUpdate { session: SessionConfig },
+  #[serde(rename = "input_audio_buffer.append")]
+  InputAudioBufferAppend {
+    audio: String, // base64 encoded audio
+  },
+  #[serde(rename = "input_audio_buffer.commit")]
+  InputAudioBufferCommit,
+  #[serde(rename = "response.create")]
+  ResponseCreate { response: ResponseConfig },
+  #[serde(rename = "conversation.item.create")]
+  ConversationItemCreate { item: ConversationItem },
+  #[serde(rename = "conversation.item.truncate")]
+  ConversationItemTruncate {
+    item_id: String,
+    content_index: u32,
+    audio_end_ms: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_id: Option<String>,
+  },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SessionConfig {
+  pub modalities: Vec<String>,
+  pub instructions: String,
+  pub voice: String,
+  pub input_audio_format: String,
+  pub output_audio_format: String,
+  pub input_audio_transcription: Option<TranscriptionConfig>,
+  pub turn_detection: Option<TurnDetectionConfig>,
+  pub tools: Vec<serde_json::Value>,
+  pub tool_choice: String,
+  pub temperature: f32,
+  pub max_response_output_tokens: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TranscriptionConfig {
+  pub model: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TurnDetectionConfig {
+  #[serde(rename = "type")]
+  pub detection_type: String,
+  pub threshold: f32,
+  pub prefix_padding_ms: u32,
+  pub silence_duration_ms: u32,
+  pub interrupt_response: bool,
+  pub create_response: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ResponseConfig {
+  pub modalities: Vec<String>,
+  pub instructions: Option<String>,
+  pub voice: Option<String>,
+  pub output_audio_format: Option<String>,
+  pub tools: Option<Vec<serde_json::Value>>,
+  pub tool_choice: Option<String>,
+  pub temperature: Option<f32>,
+  pub max_output_tokens: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ConversationItem {
+  pub id: Option<String>,
+  #[serde(rename = "type")]
+  pub item_type: String,
+  pub status: Option<String>,
+  pub role: String,
+  pub content: Vec<ContentPart>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+  #[serde(rename = "input_text")]
+  InputText { text: String },
+  #[serde(rename = "input_audio")]
+  InputAudio {
+    audio: String,
+    transcript: Option<String>,
+  },
+  #[serde(rename = "text")]
+  Text { text: String },
+  #[serde(rename = "audio")]
+  Audio {
+    audio: String,
+    transcript: Option<String>,
+  },
+}
+
+// Incoming message types from OpenAI
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+pub enum OpenAIRealtimeResponse {
+  #[serde(rename = "error")]
+  Error { error: ErrorDetails },
+  #[serde(rename = "session.created")]
+  SessionCreated { session: serde_json::Value },
+  #[serde(rename = "session.updated")]
+  SessionUpdated { session: serde_json::Value },
+  #[serde(rename = "conversation.item.created")]
+  ConversationItemCreated { item: serde_json::Value },
+  #[serde(rename = "conversation.item.truncated")]
+  ConversationItemTruncated { item: serde_json::Value },
+  #[serde(rename = "response.audio.delta")]
+  ResponseAudioDelta {
+    response_id: String,
+    item_id: String,
+    output_index: u32,
+    content_index: u32,
+    delta: String, // base64 encoded audio
+  },
+  #[serde(rename = "response.audio.done")]
+  ResponseAudioDone {
+    response_id: String,
+    item_id: String,
+    output_index: u32,
+    content_index: u32,
+  },
+  #[serde(rename = "response.text.delta")]
+  ResponseTextDelta {
+    response_id: String,
+    item_id: String,
+    output_index: u32,
+    content_index: u32,
+    delta: String,
+  },
+  #[serde(rename = "response.audio_transcript.delta")]
+  ResponseAudioTranscriptDelta {
+    response_id: String,
+    item_id: String,
+    output_index: u32,
+    content_index: u32,
+    delta: String,
+  },
+  #[serde(rename = "response.done")]
+  ResponseDone { response: serde_json::Value },
+  #[serde(rename = "input_audio_buffer.speech_started")]
+  InputAudioBufferSpeechStarted {
+    audio_start_ms: u32,
+    item_id: String,
+  },
+  #[serde(rename = "input_audio_buffer.speech_stopped")]
+  InputAudioBufferSpeechStopped { audio_end_ms: u32, item_id: String },
+  #[serde(other)]
+  Other,
+}
+
+fn convert_pcm16_to_f32(bytes: &[u8]) -> Vec<f32> {
+  let mut samples = Vec::with_capacity(bytes.len() / 2);
+
+  for chunk in bytes.chunks_exact(2) {
+    let pcm16_sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+    let f32_sample = pcm16_sample as f32 / 32767.0;
+    samples.push(f32_sample);
+  }
+
+  samples
+}
 
 async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
   let mut ws = fastwebsockets::FragmentCollector::new(fut.await?);
-
+  let (mut node, mut event) = DoraNode::init_from_env().unwrap();
   loop {
-    let frame = ws.read_frame().await?;
+    let mut frame = ws.read_frame().await?;
+
     match frame.opcode {
       OpCode::Close => break,
       OpCode::Text | OpCode::Binary => {
-        ws.write_frame(frame).await?;
+        let serialized_data = frame.payload.to_vec();
+        let data: OpenAIRealtimeMessage =
+          serde_json::from_slice(&serialized_data).unwrap();
+
+        if let OpenAIRealtimeMessage::InputAudioBufferAppend { audio } = data {
+          // println!("Received audio data: {}", audio);
+          let audio2 = audio.clone();
+          let f32_data = audio;
+          // Decode base64 encoded audio data
+          let f32_data = f32_data.trim();
+          if f32_data.is_empty() {
+            continue;
+          }
+
+          if let Ok(f32_data) = base64::decode(f32_data) {
+            let f32_data = convert_pcm16_to_f32(&f32_data);
+            // Downsample to 16 kHz from 24 kHz
+            let f32_data = f32_data
+              .into_iter()
+              .enumerate()
+              .filter(|(i, _)| i % 3 != 0)
+              .map(|(_, v)| v)
+              .collect::<Vec<f32>>();
+            let mut parameter = MetadataParameters::default();
+            parameter.insert(
+              "sample_rate".to_string(),
+              dora_node_api::Parameter::Integer(16000),
+            );
+            node
+              .send_output(
+                DataId::from("audio".to_string()),
+                parameter,
+                f32_data.into_arrow(),
+              )
+              .unwrap();
+            let ev = event.recv_async_timeout(Duration::from_millis(10)).await;
+
+            // println!("Received event: {:?}", ev);
+            let frame = match ev {
+              Some(dora_node_api::Event::Input { id, metadata, data }) => {
+                if data.data_type() == &DataType::Utf8 {
+                  let data = data.as_string::<i32>();
+                  let str = data.value(0);
+                  let serialized_data =
+                    OpenAIRealtimeResponse::ResponseAudioTranscriptDelta {
+                      response_id: "123".to_string(),
+                      item_id: "123".to_string(),
+                      output_index: 123,
+                      content_index: 123,
+                      delta: str.to_string(),
+                    };
+
+                  frame.payload = Payload::Bytes(
+                    Bytes::from(
+                      serde_json::to_string(&serialized_data).unwrap(),
+                    )
+                    .into(),
+                  );
+                  frame.opcode = OpCode::Text;
+                  frame
+                } else {
+                  let data: Vec<u8> = into_vec(&data).unwrap();
+
+                  let serialized_data =
+                    OpenAIRealtimeResponse::ResponseAudioDelta {
+                      response_id: "123".to_string(),
+                      item_id: "123".to_string(),
+                      output_index: 123,
+                      content_index: 123,
+                      delta: base64::encode(data),
+                    };
+
+                  frame.payload = Payload::Bytes(
+                    Bytes::from(
+                      serde_json::to_string(&serialized_data).unwrap(),
+                    )
+                    .into(),
+                  );
+                  frame.opcode = OpCode::Text;
+                  frame
+                }
+              }
+              Some(dora_node_api::Event::Error(s)) => {
+                // println!("Error in input: {}", s);
+                continue;
+              }
+              _ => continue,
+            };
+            ws.write_frame(frame).await?;
+          }
+        }
       }
       _ => {}
     }
@@ -55,14 +339,15 @@ async fn server_upgrade(
 }
 
 fn main() -> Result<(), WebSocketError> {
-  let rt = tokio::runtime::Builder::new_current_thread()
+  let rt = tokio::runtime::Builder::new_multi_thread()
     .enable_io()
+    .enable_time()
     .build()
     .unwrap();
 
   rt.block_on(async move {
-    let listener = TcpListener::bind("127.0.0.1:8080").await?;
-    println!("Server started, listening on {}", "127.0.0.1:8080");
+    let listener = TcpListener::bind("127.0.0.1:8848").await?;
+    println!("Server started, listening on {}", "127.0.0.1:8848");
     loop {
       let (stream, _) = listener.accept().await?;
       println!("Client connected");
