@@ -1,10 +1,11 @@
 nodes:
   - id: server
-    path: ../target/release/examples/echo_server
+    path: dynamic
     build: cargo build --release --example echo_server --features upgrade
     inputs:
       audio: dora-kokoro-tts/audio
-      text: hibiki/text
+      text: hibiki/word
+      # text_llm: llm/text
     outputs:
       - audio
 
@@ -18,11 +19,23 @@ nodes:
         queue_size: 1000000
     outputs:
       - text
+      - word
+
+  - id: llm
+    build: pip install -e ../../node-hub/dora-qwen
+    path: dora-qwen
+    inputs:
+      text: hibiki/text
+    outputs:
+      - text
+    env:
+      MODEL_NAME_OR_PATH: Qwen/Qwen2.5-1.5B-Instruct-GGUF
+      # MODEL_NAME_OR_PATH: Qwen/Qwen3-1.7B-GGUF
 
   - id: dora-kokoro-tts
     build: pip install -e ../../node-hub/dora-kokoro-tts
     path: dora-kokoro-tts
     inputs:
-      text: hibiki/text
+      text: llm/text
     outputs:
       - audio

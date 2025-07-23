@@ -12,17 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
-
 use dora_node_api::arrow::array::AsArray;
 use dora_node_api::arrow::array::OffsetSizeTrait;
 use dora_node_api::arrow::datatypes::DataType;
 use dora_node_api::dora_core::config::DataId;
 use dora_node_api::dora_core::config::Input;
+use dora_node_api::dora_core::config::NodeId;
+use dora_node_api::dora_core::topics::DORA_COORDINATOR_PORT_CONTROL_DEFAULT;
+use dora_node_api::dora_core::topics::DORA_COORDINATOR_PORT_DEFAULT;
 use dora_node_api::into_vec;
 use dora_node_api::DoraNode;
+use dora_node_api::EventStream;
 use dora_node_api::IntoArrow;
 use dora_node_api::MetadataParameters;
+use dora_node_api::StopCause;
 use fastwebsockets::upgrade;
 use fastwebsockets::Frame;
 use fastwebsockets::OpCode;
@@ -35,9 +38,17 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::Request;
 use hyper::Response;
+use rand::random;
 use serde;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fs;
+use std::io::{self, Write};
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::internal::msgs::base;
 
@@ -217,12 +228,91 @@ fn convert_pcm16_to_f32(bytes: &[u8]) -> Vec<f32> {
   samples
 }
 
+fn convert_f32_to_pcm16(samples: &[f32]) -> Vec<u8> {
+  let mut pcm16_bytes = Vec::with_capacity(samples.len() * 2);
+
+  for &sample in samples {
+    // Clamp to [-1.0, 1.0] and convert to i16
+    let clamped = sample.max(-1.0).min(1.0);
+    let pcm16_sample = (clamped * 32767.0) as i16;
+    pcm16_bytes.extend_from_slice(&pcm16_sample.to_le_bytes());
+  }
+
+  pcm16_bytes
+}
+
+/// Replaces a placeholder in a file and writes the result to an output file.
+///
+/// # Arguments
+///
+/// * `input_path` - Path to the input file with placeholder text.
+/// * `placeholder` - The placeholder text to search for (e.g., "{{PLACEHOLDER}}").
+/// * `replacement` - The text to replace the placeholder with.
+/// * `output_path` - Path to write the modified content.
+fn replace_placeholder_in_file(
+  input_path: &str,
+  placeholder: &str,
+  replacement: &str,
+  output_path: &str,
+) -> io::Result<()> {
+  // Read the file content into a string
+  let content = fs::read_to_string(input_path)?;
+
+  // Replace the placeholder
+  let modified_content = content.replace(placeholder, replacement);
+
+  // Write the modified content to the output file
+  let mut file = fs::File::create(output_path)?;
+  file.write_all(modified_content.as_bytes())?;
+
+  Ok(())
+}
+
 async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
   let mut ws = fastwebsockets::FragmentCollector::new(fut.await?);
-  let (mut node, mut event) = DoraNode::init_from_env().unwrap();
+
+  let id = random::<u16>();
+  let node_id = format!("server-{id}");
+  let dataflow = format!(
+    "/Users/xaviertao/Documents/fastwebsockets/examples/qwen1.5-{}.yml",
+    id
+  );
+  replace_placeholder_in_file(
+    "/Users/xaviertao/Documents/fastwebsockets/examples/qwen1.5-template.yml",
+    "NODE_ID",
+    &node_id,
+    &dataflow,
+  )
+  .unwrap();
+  /// Copy configuration file but replace the node ID with "server-id"
+  // Read the configuration file and replace the node ID with "server-id"
+  dora_cli::command::start(
+    dataflow,
+    Some(node_id.to_string()),
+    SocketAddr::new(
+      IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+      DORA_COORDINATOR_PORT_CONTROL_DEFAULT,
+    ),
+    false,
+    true,
+    false,
+    true,
+  )
+  .unwrap();
+  let (mut node, mut events) =
+    DoraNode::init_from_node_id(NodeId::from(node_id.clone())).unwrap();
+  let serialized_data = OpenAIRealtimeResponse::SessionCreated {
+    session: serde_json::Value::Null,
+  };
+
+  let payload = Payload::Bytes(
+    Bytes::from(serde_json::to_string(&serialized_data).unwrap()).into(),
+  );
+  let frame = Frame::text(payload);
+  ws.write_frame(frame).await?;
   loop {
     let mut frame = ws.read_frame().await?;
-
+    let mut finished = false;
     match frame.opcode {
       OpCode::Close => break,
       OpCode::Text | OpCode::Binary => {
@@ -230,95 +320,115 @@ async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
         let data: OpenAIRealtimeMessage =
           serde_json::from_slice(&serialized_data).unwrap();
 
-        if let OpenAIRealtimeMessage::InputAudioBufferAppend { audio } = data {
-          // println!("Received audio data: {}", audio);
-          let audio2 = audio.clone();
-          let f32_data = audio;
-          // Decode base64 encoded audio data
-          let f32_data = f32_data.trim();
-          if f32_data.is_empty() {
-            continue;
-          }
+        match data {
+          OpenAIRealtimeMessage::InputAudioBufferAppend { audio } => {
+            // println!("Received audio data: {}", audio);
+            let f32_data = audio;
+            // Decode base64 encoded audio data
+            let f32_data = f32_data.trim();
+            if f32_data.is_empty() {
+              continue;
+            }
 
-          if let Ok(f32_data) = base64::decode(f32_data) {
-            let f32_data = convert_pcm16_to_f32(&f32_data);
-            // Downsample to 16 kHz from 24 kHz
-            let f32_data = f32_data
-              .into_iter()
-              .enumerate()
-              .filter(|(i, _)| i % 3 != 0)
-              .map(|(_, v)| v)
-              .collect::<Vec<f32>>();
-            let mut parameter = MetadataParameters::default();
-            parameter.insert(
-              "sample_rate".to_string(),
-              dora_node_api::Parameter::Integer(16000),
-            );
-            node
-              .send_output(
-                DataId::from("audio".to_string()),
-                parameter,
-                f32_data.into_arrow(),
-              )
-              .unwrap();
-            let ev = event.recv_async_timeout(Duration::from_millis(10)).await;
+            if let Ok(f32_data) = base64::decode(f32_data) {
+              let f32_data = convert_pcm16_to_f32(&f32_data);
+              // Downsample to 16 kHz from 24 kHz
+              let f32_data = f32_data
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| i % 3 != 0)
+                .map(|(_, v)| v)
+                .collect::<Vec<f32>>();
+              let mut parameter = MetadataParameters::default();
+              parameter.insert(
+                "sample_rate".to_string(),
+                dora_node_api::Parameter::Integer(16000),
+              );
+              node
+                .send_output(
+                  DataId::from("audio".to_string()),
+                  parameter,
+                  f32_data.into_arrow(),
+                )
+                .unwrap();
+              let ev =
+                events.recv_async_timeout(Duration::from_millis(10)).await;
 
-            // println!("Received event: {:?}", ev);
-            let frame = match ev {
-              Some(dora_node_api::Event::Input { id, metadata, data }) => {
-                if data.data_type() == &DataType::Utf8 {
-                  let data = data.as_string::<i32>();
-                  let str = data.value(0);
-                  let serialized_data =
-                    OpenAIRealtimeResponse::ResponseAudioTranscriptDelta {
-                      response_id: "123".to_string(),
-                      item_id: "123".to_string(),
-                      output_index: 123,
-                      content_index: 123,
-                      delta: str.to_string(),
-                    };
+              // println!("Received event: {:?}", ev);
+              let frame = match ev {
+                Some(dora_node_api::Event::Input { id, metadata, data }) => {
+                  if data.data_type() == &DataType::Utf8 {
+                    let data = data.as_string::<i32>();
+                    let str = data.value(0);
+                    let serialized_data =
+                      OpenAIRealtimeResponse::ResponseAudioTranscriptDelta {
+                        response_id: "123".to_string(),
+                        item_id: "123".to_string(),
+                        output_index: 123,
+                        content_index: 123,
+                        delta: str.to_string(),
+                      };
 
-                  frame.payload = Payload::Bytes(
-                    Bytes::from(
-                      serde_json::to_string(&serialized_data).unwrap(),
-                    )
-                    .into(),
-                  );
-                  frame.opcode = OpCode::Text;
-                  frame
-                } else {
-                  let data: Vec<u8> = into_vec(&data).unwrap();
+                    frame.payload = Payload::Bytes(
+                      Bytes::from(
+                        serde_json::to_string(&serialized_data).unwrap(),
+                      )
+                      .into(),
+                    );
+                    frame.opcode = OpCode::Text;
+                    frame
+                  } else if id.contains("audio") {
+                    let data: Vec<f32> = into_vec(&data).unwrap();
+                    let data = convert_f32_to_pcm16(&data);
+                    let serialized_data =
+                      OpenAIRealtimeResponse::ResponseAudioDelta {
+                        response_id: "123".to_string(),
+                        item_id: "123".to_string(),
+                        output_index: 123,
+                        content_index: 123,
+                        delta: base64::encode(data),
+                      };
+                    finished = true;
 
-                  let serialized_data =
-                    OpenAIRealtimeResponse::ResponseAudioDelta {
-                      response_id: "123".to_string(),
-                      item_id: "123".to_string(),
-                      output_index: 123,
-                      content_index: 123,
-                      delta: base64::encode(data),
-                    };
-
-                  frame.payload = Payload::Bytes(
-                    Bytes::from(
-                      serde_json::to_string(&serialized_data).unwrap(),
-                    )
-                    .into(),
-                  );
-                  frame.opcode = OpCode::Text;
-                  frame
+                    frame.payload = Payload::Bytes(
+                      Bytes::from(
+                        serde_json::to_string(&serialized_data).unwrap(),
+                      )
+                      .into(),
+                    );
+                    frame.opcode = OpCode::Text;
+                    frame
+                  } else {
+                    unimplemented!()
+                  }
                 }
+                Some(dora_node_api::Event::Error(s)) => {
+                  // println!("Error in input: {}", s);
+                  continue;
+                }
+                _ => break,
+              };
+              ws.write_frame(frame).await?;
+              if finished {
+                let serialized_data = OpenAIRealtimeResponse::ResponseDone {
+                  response: serde_json::Value::Null,
+                };
+
+                let payload = Payload::Bytes(
+                  Bytes::from(serde_json::to_string(&serialized_data).unwrap())
+                    .into(),
+                );
+                println!("Sending response done: {:?}", serialized_data);
+                let frame = Frame::text(payload);
+                ws.write_frame(frame).await?;
               }
-              Some(dora_node_api::Event::Error(s)) => {
-                // println!("Error in input: {}", s);
-                continue;
-              }
-              _ => continue,
-            };
-            ws.write_frame(frame).await?;
+            }
           }
+          OpenAIRealtimeMessage::InputAudioBufferCommit => break,
+          _ => {}
         }
       }
-      _ => {}
+      _ => break,
     }
   }
 
@@ -346,7 +456,7 @@ fn main() -> Result<(), WebSocketError> {
     .unwrap();
 
   rt.block_on(async move {
-    let listener = TcpListener::bind("127.0.0.1:8848").await?;
+    let listener = TcpListener::bind("127.0.0.1:8123").await?;
     println!("Server started, listening on {}", "127.0.0.1:8848");
     loop {
       let (stream, _) = listener.accept().await?;
