@@ -275,7 +275,7 @@ async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
   let node_id = format!("server-{id}");
   let dataflow = format!("qwen1.5-{}.yml", id);
   replace_placeholder_in_file(
-    "qwen1.5-template.yml",
+    "qwen1.5-template-cuda.yml",
     "NODE_ID",
     &node_id,
     &dataflow,

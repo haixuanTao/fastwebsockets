@@ -1,0 +1,46 @@
+nodes:
+  - id: NODE_ID
+    path: dynamic
+    build: cargo build --release --example echo_server --features upgrade
+    inputs:
+      audio: dora-kokoro-tts/audio
+      text: hibiki/word
+      # text_llm: llm/text
+    outputs:
+      - audio
+
+  - id: hibiki
+    git: https://github.com/haixuanTao/delayed-streams-modeling.git
+    args: gen
+    build: |
+      sudo apt-get install pkg-config
+      cargo build --manifest-path stt-rs/Cargo.toml -r --features metal
+    path: stt-rs/target/release/kyutai-stt-rs
+    inputs:
+      audio:
+        source: NODE_ID/audio
+        queue_size: 1000000
+    outputs:
+      - text
+      - word
+
+  - id: llm
+    git: https://github.com/dora-rs/dora
+    branch: make-qwen-llm-configurable
+    build: pip install -e node-hub/dora-qwen
+    path: dora-qwen
+    inputs:
+      text: hibiki/text
+    outputs:
+      - text
+    env:
+      MODEL_NAME_OR_PATH: Qwen/Qwen2.5-1.5B-Instruct-GGUF
+      # MODEL_NAME_OR_PATH: Qwen/Qwen3-1.7B-GGUF
+
+  - id: dora-kokoro-tts
+    build: pip install dora-kokoro-tts
+    path: dora-kokoro-tts
+    inputs:
+      text: llm/text
+    outputs:
+      - audio
