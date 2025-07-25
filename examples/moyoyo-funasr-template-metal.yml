@@ -10,7 +10,7 @@ nodes:
       - audio
 
   - id: dora-vad
-    build: pip install -e ../../node-hub/dora-vad
+    build: pip install dora-vad
     path: dora-vad
     inputs:
       audio: NODE_ID/audio
@@ -45,9 +45,11 @@ nodes:
       # MODEL_NAME_OR_PATH: Qwen/Qwen3-1.7B-GGUF
 
   - id: dora-moyoyo-tts
-    build: pip install -e ../../VoiceDialogue
+    build: pip install git+https://github.com/moxin-org/moxin-voice-chat.git
     path: dora-moyoyo-tts
     inputs:
       text: llm/text
     outputs:
       - audio
+    env:
+      GIT_LFS_SKIP_SMUDGE: 1
