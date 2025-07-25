@@ -42,6 +42,7 @@ use rand::random;
 use serde;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::to_string;
 use std::fs;
 use std::io::{self, Write};
 use std::net::IpAddr;
@@ -271,16 +272,26 @@ fn replace_placeholder_in_file(
 async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
   let mut ws = fastwebsockets::FragmentCollector::new(fut.await?);
 
+  let frame = ws.read_frame().await?;
+  if frame.opcode != OpCode::Text {
+    return Err(WebSocketError::InvalidConnectionHeader);
+  }
+  let data: OpenAIRealtimeMessage =
+    serde_json::from_slice(&frame.payload).unwrap();
+  let OpenAIRealtimeMessage::SessionUpdate { session } = data else {
+    return Err(WebSocketError::InvalidConnectionHeader);
+  };
+
+  let input_audio_transcription = session
+    .input_audio_transcription
+    .map_or("moyoyo-whisper".to_string(), |t| t.model);
   let id = random::<u16>();
   let node_id = format!("server-{id}");
-  let dataflow = format!("qwen1.5-{}.yml", id);
-  replace_placeholder_in_file(
-    "qwen1.5-template-cuda.yml",
-    "NODE_ID",
-    &node_id,
-    &dataflow,
-  )
-  .unwrap();
+  let dataflow = format!("moyoyo-{}.yml", id);
+  let template = format!("{input_audio_transcription}-template-metal.yml");
+  println!("Filling template: {}", template);
+  replace_placeholder_in_file(&template, "NODE_ID", &node_id, &dataflow)
+    .unwrap();
   /// Copy configuration file but replace the node ID with "server-id"
   // Read the configuration file and replace the node ID with "server-id"
   dora_cli::command::start(
@@ -313,9 +324,8 @@ async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
     match frame.opcode {
       OpCode::Close => break,
       OpCode::Text | OpCode::Binary => {
-        let serialized_data = frame.payload.to_vec();
         let data: OpenAIRealtimeMessage =
-          serde_json::from_slice(&serialized_data).unwrap();
+          serde_json::from_slice(&frame.payload).unwrap();
 
         match data {
           OpenAIRealtimeMessage::InputAudioBufferAppend { audio } => {
@@ -376,6 +386,15 @@ async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
                     frame
                   } else if id.contains("audio") {
                     let data: Vec<f32> = into_vec(&data).unwrap();
+                    let sample_rate = metadata
+                      .parameters
+                      .get("sample_rate")
+                      .and_then(|v| match v {
+                        dora_node_api::Parameter::Integer(i) => Some(*i),
+                        _ => None,
+                      })
+                      .unwrap_or(24000);
+
                     let data = convert_f32_to_pcm16(&data);
                     let serialized_data =
                       OpenAIRealtimeResponse::ResponseAudioDelta {
@@ -399,7 +418,7 @@ async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
                     unimplemented!()
                   }
                 }
-                Some(dora_node_api::Event::Error(s)) => {
+                Some(dora_node_api::Event::Error(_)) => {
                   // println!("Error in input: {}", s);
                   continue;
                 }

@@ -3,20 +3,29 @@ nodes:
     path: dynamic
     build: cargo build --release --example echo_server --features upgrade
     inputs:
-      audio: dora-kokoro-tts/audio
-      text: hibiki/word
+      audio: dora-moyoyo-tts/audio
+      text: stt/text
       # text_llm: llm/text
     outputs:
       - audio
 
-  - id: hibiki
-    git: https://github.com/haixuanTao/delayed-streams-modeling.git
-    args: gen
-    build: cargo build --manifest-path stt-rs/Cargo.toml -r --features metal
-    path: stt-rs/target/release/kyutai-stt-rs
+  - id: dora-vad
+    build: pip install -e ../../node-hub/dora-vad
+    path: dora-vad
+    inputs:
+      audio: NODE_ID/audio
+    outputs:
+      - audio
+    env:
+      MIN_SPEECH_DURATION_MS: 2000
+      MIN_SILENCE_DURATION_MS: 1200
+      THRESHOLD: 0.6
+
+  - id: stt
+    path: dora-moyoyo-whisper
     inputs:
       audio:
-        source: NODE_ID/audio
+        source: dora-vad/audio
         queue_size: 1000000
     outputs:
       - text
@@ -28,16 +37,16 @@ nodes:
     build: pip install -e node-hub/dora-qwen
     path: dora-qwen
     inputs:
-      text: hibiki/text
+      text: stt/text
     outputs:
       - text
     env:
       MODEL_NAME_OR_PATH: Qwen/Qwen2.5-1.5B-Instruct-GGUF
       # MODEL_NAME_OR_PATH: Qwen/Qwen3-1.7B-GGUF
 
-  - id: dora-kokoro-tts
-    build: pip install dora-kokoro-tts
-    path: dora-kokoro-tts
+  - id: dora-moyoyo-tts
+    build: pip install -e ../../VoiceDialogue
+    path: dora-moyoyo-tts
     inputs:
       text: llm/text
     outputs:
