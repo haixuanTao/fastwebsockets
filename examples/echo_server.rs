@@ -287,7 +287,7 @@ async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
     .map_or("moyoyo-whisper".to_string(), |t| t.model);
   let id = random::<u16>();
   let node_id = format!("server-{id}");
-  let dataflow = format!("moyoyo-{}.yml", id);
+  let dataflow = format!("{input_audio_transcription}-{}.yml", id);
   let template = format!("{input_audio_transcription}-template-metal.yml");
   println!("Filling template: {}", template);
   replace_placeholder_in_file(&template, "NODE_ID", &node_id, &dataflow)
