@@ -45,11 +45,9 @@ nodes:
       # MODEL_NAME_OR_PATH: Qwen/Qwen3-1.7B-GGUF
 
   - id: dora-moyoyo-tts
-    build: pip install git+https://github.com/moxin-org/moxin-voice-chat.git
+    build: pip install -e ../../moxin-voice-chat
     path: dora-moyoyo-tts
     inputs:
       text: llm/text
     outputs:
       - audio
-    env:
-      GIT_LFS_SKIP_SMUDGE: 1
