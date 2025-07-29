@@ -22,7 +22,9 @@ nodes:
       THRESHOLD: 1.0
 
   - id: stt
-    build: pip install dora-distil-whisper
+    git: https://github.com/dora-rs/dora
+    branch: make-qwen-llm-configurable
+    build: pip install -e node-hub/dora-distil-whisper
     path: dora-distil-whisper
     inputs:
       audio:
