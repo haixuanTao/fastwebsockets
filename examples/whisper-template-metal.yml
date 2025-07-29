@@ -1,0 +1,53 @@
+nodes:
+  - id: NODE_ID
+    path: dynamic
+    build: cargo build --release --example echo_server --features upgrade
+    inputs:
+      audio: tts/audio
+      text: stt/text
+      # text_llm: llm/text
+    outputs:
+      - audio
+
+  - id: dora-vad
+    build: pip install dora-vad
+    path: dora-vad
+    inputs:
+      audio: NODE_ID/audio
+    outputs:
+      - audio
+    env:
+      MIN_SPEECH_DURATION_MS: 2000
+      MIN_SILENCE_DURATION_MS: 1200
+      THRESHOLD: 1.0
+
+  - id: stt
+    build: pip install dora-distil-whisper
+    path: dora-distil-whisper
+    inputs:
+      audio:
+        source: dora-vad/audio
+        queue_size: 1000000
+    outputs:
+      - text
+      - word
+
+  - id: llm
+    git: https://github.com/dora-rs/dora
+    branch: make-qwen-llm-configurable
+    build: pip install -e node-hub/dora-qwen
+    path: dora-qwen
+    inputs:
+      text: stt/text
+    outputs:
+      - text
+    env:
+      MODEL_NAME_OR_PATH: Qwen/Qwen2.5-1.5B-Instruct-GGUF
+
+  - id: tts
+    build: pip install dora-kokoro-tts
+    path: dora-kokoro-tts
+    inputs:
+      text: llm/text
+    outputs:
+      - audio

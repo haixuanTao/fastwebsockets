@@ -473,7 +473,7 @@ fn main() -> Result<(), WebSocketError> {
 
   rt.block_on(async move {
     let listener = TcpListener::bind("127.0.0.1:8123").await?;
-    println!("Server started, listening on {}", "127.0.0.1:8848");
+    println!("Server started, listening on {}", "127.0.0.1:8123");
     loop {
       let (stream, _) = listener.accept().await?;
       println!("Client connected");
