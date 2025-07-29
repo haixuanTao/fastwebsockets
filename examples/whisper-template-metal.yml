@@ -44,7 +44,7 @@ nodes:
     outputs:
       - text
     env:
-      MODEL_NAME_OR_PATH: Qwen/Qwen2.5-1.5B-Instruct-GGUF
+      MODEL_NAME_OR_PATH: Qwen/Qwen2.5-0.5B-Instruct-GGUF
 
   - id: tts
     build: pip install dora-kokoro-tts
